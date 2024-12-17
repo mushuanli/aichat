@@ -36,7 +36,7 @@ function saveConfig() {
     globalConfig.configs[globalConfig.sel].token = newApiKey;
 
     const selectedValue = document.getElementById('chatbot-name').value;
-    globalConfig.sel    = selectedValue;
+    globalConfig.sel = selectedValue;
     document.getElementById('api-key').value = globalConfig.configs[selectedValue].token || '';
 
     localStorage.setItem('chatConfig', JSON.stringify(globalConfig));
@@ -67,6 +67,13 @@ function getConfig() {
                 url: 'https://api.openai.com/v1/engines/davinci-codex/completions',
                 model: 'gpt-4o_2024-05-13',
             };
+        case 'Claude':
+            return {
+                name,
+                token,
+                url: 'https://api.anthropic.com/v1/messages',
+                model: 'claude-3-opus-20240229',
+            };
         case 'XAI':
             return {
                 name,
@@ -93,32 +100,81 @@ async function sendMessage() {
 
     addMessageToHistory('You', message);
     messageInput.value = '';
-    console.log('svr info:',svrInfo);
+    console.log('svr info:', svrInfo);
+
+    const attachments = await getAttachments();
+
     try {
-        const response = await fetch(svrInfo.url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${svrInfo.token}`
-            },
-            body: JSON.stringify({
-                model: svrInfo.model,
-                prompt: message,
-                max_tokens: 150
-            })
-        });
+        let response;
+        if (svrInfo.name === 'Claude') {
+            response = await sendClaudeRequest(svrInfo, message, attachments);
+        } else {
+            response = await sendGenericRequest(svrInfo, message);
+        }
 
         if (!response.ok) {
             throw new Error('API request failed');
         }
 
         const data = await response.json();
-        const chatGPTResponse = data.choices[0].text.trim();
-        addMessageToHistory(svrInfo.name, chatGPTResponse);
+        let chatResponse;
+        if (svrInfo.name === 'Claude') {
+            chatResponse = data.content[0].text;
+        } else {
+            chatResponse = data.choices[0].text.trim();
+        }
+        addMessageToHistory(svrInfo.name, chatResponse);
     } catch (error) {
         console.error('Error:', error);
         addMessageToHistory('System', 'An error occurred while processing your request.');
     }
+
+    // 清除附件
+    clearAttachments();
+}
+
+async function sendClaudeRequest(svrInfo, message, attachments) {
+    const body = {
+        model: svrInfo.model,
+        messages: [{ role: 'user', content: message }],
+        max_tokens: 150
+    };
+
+    if (attachments.length > 0) {
+        body.messages[0].content = [
+            { type: 'text', text: message },
+            ...attachments.map(attachment => ({
+                type: 'image',
+                source: { type: 'base64', media_type: attachment.type, data: attachment.data }
+            }))
+        ];
+    }
+
+    return fetch(svrInfo.url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': svrInfo.token,
+            'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify(body)
+    });
+}
+
+async function sendGenericRequest(svrInfo, message) {
+    return fetch(svrInfo.url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${svrInfo.token}`
+        },
+        body: JSON.stringify({
+            model: svrInfo.model,
+            messages:           [{"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": message}],
+"stream": false
+        })
+    });
 }
 
 function addMessageToHistory(sender, message) {
@@ -130,7 +186,7 @@ function addMessageToHistory(sender, message) {
     chatHistory.scrollTop = chatHistory.scrollHeight;
 }
 
-// 文件拖放处理代码保持不变
+// 文件拖放处理代码
 document.getElementById('message-input').addEventListener('dragover', (e) => {
     e.preventDefault();
 });
@@ -160,8 +216,28 @@ function addFileIcon(file) {
 
     fileIconContainer.appendChild(fileIcon);
     fileIconContainer.appendChild(deleteIcon);
+    fileIconContainer.dataset.file = JSON.stringify(file);
 
     document.getElementById('input-container').insertBefore(fileIconContainer, document.getElementById('button-container'));
+}
+
+async function getAttachments() {
+    const attachments = [];
+    const fileIcons = document.querySelectorAll('.file-icon');
+    for (const icon of fileIcons) {
+        const file = JSON.parse(icon.dataset.file);
+        const base64Data = await readFileAsBase64(file);
+        attachments.push({
+            type: file.type,
+            data: base64Data
+        });
+    }
+    return attachments;
+}
+
+function clearAttachments() {
+    const fileIcons = document.querySelectorAll('.file-icon');
+    fileIcons.forEach(icon => icon.remove());
 }
 
 function showSettings() {
@@ -183,7 +259,6 @@ document.querySelector('.close-button')?.addEventListener('click', () => {
 });
 
 document.getElementById('chatbot-name').addEventListener('change', function () {
-    const oldname = globalConfig.sel;
     const selectedValue = this.value;
     saveConfig();
 
@@ -200,3 +275,69 @@ document.getElementById('save-settings').addEventListener('click', () => {
     }
     alert('设置已保存!');
 });
+
+// 添加文件读取功能
+function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+// 修改 getAttachments 函数以读取文件内容
+async function getAttachments() {
+    const attachments = [];
+    const fileIcons = document.querySelectorAll('.file-icon');
+    for (const icon of fileIcons) {
+        const file = JSON.parse(icon.dataset.file);
+        const base64Data = await readFileAsBase64(file);
+        attachments.push({
+            type: file.type,
+            data: base64Data
+        });
+    }
+    return attachments;
+}
+
+// 修改 sendMessage 函数为异步函数
+async function sendMessage() {
+    const messageInput = document.getElementById('message-input');
+    const message = messageInput.value.trim();
+    const svrInfo = getConfig();
+
+    if (message === '' || svrInfo === undefined) {
+        return;
+    }
+
+    addMessageToHistory('You', message);
+    messageInput.value = '';
+    console.log('svr info:', svrInfo);
+
+    const attachments = await getAttachments();
+
+    try {
+        let response;
+        if (svrInfo.name === 'Claude') {
+            response = await sendClaudeRequest(svrInfo, message, attachments);
+        } else {
+            response = await sendGenericRequest(svrInfo, message);
+        }
+
+        if (!response.ok) {
+            throw new Error('API request failed');
+        }
+
+        const data = await response.json();
+        let chatResponse;
+            chatResponse = data?.choices?.[0]?.message?.content?.trim();
+        addMessageToHistory(svrInfo.name, chatResponse);
+    } catch (error) {
+        console.error('Error:', error,JSON.stringify(error,null,2));
+        addMessageToHistory('System', 'An error occurred while processing your request.');
+    }
+
+    // 清除附件
+    clearAttachments();
+}
